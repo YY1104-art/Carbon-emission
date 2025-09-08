@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-pydantic
-pyyaml
-streamlit
-requests
-pulp
-plotly
-pandas
