@@ -1,10 +1,10 @@
 import streamlit as st
-import yaml, json, pandas as pd, math
+import yaml, pandas as pd, math
 import plotly.graph_objects as go
 import plotly.express as px
 
-st.set_page_config(layout="wide", page_title="Carbon-aware LLM Placement Safe Version")
-st.title("Carbon-aware LLM Placement — Safe Version")
+st.set_page_config(layout="wide", page_title="Carbon-aware LLM Placement Safe v15")
+st.title("Carbon-aware LLM Placement — Safe v15")
 
 # 初始化 session_state
 for key in ["cfg_area","last_res","cfg_hash","expanded_clusters"]:
@@ -19,6 +19,7 @@ if uploaded:
     except Exception as e:
         st.error(f"读取上传文件失败: {e}")
 
+# 内置示例
 if not st.session_state.get("cfg_area"):
     example = {
         "cities":[{"name":"Zurich","Iv":0.013,"Hv":900,"lat":47.3769,"lon":8.5417},
@@ -51,7 +52,7 @@ def get_result():
         cfg = yaml.safe_load(st.session_state.get("cfg_area","")) or {}
         cities = cfg.get("cities", [])
         tasks = cfg.get("tasks", [])
-        return {"placements": {"0": {c["name"]: {t["name"]: 100 for t in tasks} for c in cities}}}
+        return {"placements": {"0": {c.get("name",""): {t.get("name",""): 100 for t in tasks} for c in cities}}}
     except Exception as e:
         st.error(f"生成示例结果失败: {e}")
         return {"placements": {}}
@@ -64,13 +65,13 @@ res = st.session_state["last_res"]
 placements = res.get("placements",{})
 
 if not placements:
-    st.warning("当前配置无城市或任务，请检查 YAML/JSON 文件内容。")
+    st.warning("当前配置无有效城市或任务，请上传正确 YAML/JSON 文件。")
 else:
     first_period = list(placements.keys())[0]
     try:
         cfg = yaml.safe_load(st.session_state["cfg_area"]) or {}
         cities = cfg.get("cities", [])
-        tasks = [t["name"] for t in cfg.get("tasks",[])]
+        tasks = [t.get("name","") for t in cfg.get("tasks",[])]
     except Exception as e:
         st.error(f"解析配置失败: {e}")
         cities=[]
@@ -88,102 +89,107 @@ else:
     # 构建城市数据
     rows=[]
     for c in cities:
-        r={"name":c.get("name",""),"lat":c.get("lat"),"lon":c.get("lon")}
+        r={"name": c.get("name",""), "lat": c.get("lat", None), "lon": c.get("lon", None)}
         ps=placements.get(first_period,{}).get(c.get("name",""),{})
         for t in selected_tasks: r[t]=ps.get(t,0)
         r["total"]=sum(r[t] for t in selected_tasks)
         rows.append(r)
     df=pd.DataFrame(rows)
 
-    # 避免重叠
-    df['lat_adj']=df['lat']; df['lon_adj']=df['lon']
-    min_dist=city_offset
-    for i in range(len(df)):
-        for j in range(i+1,len(df)):
-            dlat=df.loc[i,'lat_adj']-df.loc[j,'lat_adj']
-            dlon=df.loc[i,'lon_adj']-df.loc[j,'lon_adj']
-            dist=math.sqrt(dlat**2+dlon**2)
-            if dist<min_dist:
-                df.loc[j,'lat_adj']+=(min_dist-dist)/2
-                df.loc[j,'lon_adj']+=(min_dist-dist)/2
+    # 安全检查 lat/lon
+    if df.empty or 'lat' not in df.columns or 'lon' not in df.columns or df['lat'].isnull().all() or df['lon'].isnull().all():
+        st.info("地图绘制跳过：没有有效经纬度数据（请上传正确的城市配置）。")
+    else:
+        # 避免重叠
+        df['lat_adj'] = df['lat']
+        df['lon_adj'] = df['lon']
+        min_dist = city_offset
+        for i in range(len(df)):
+            for j in range(i+1,len(df)):
+                dlat=df.loc[i,'lat_adj']-df.loc[j,'lat_adj']
+                dlon=df.loc[i,'lon_adj']-df.loc[j,'lon_adj']
+                dist=math.sqrt(dlat**2+dlon**2)
+                if dist<min_dist:
+                    df.loc[j,'lat_adj']+=(min_dist-dist)/2
+                    df.loc[j,'lon_adj']+=(min_dist-dist)/2
 
-    # 聚合城市
-    clusters=[]; used=set()
-    for i,row in df.iterrows():
-        if i in used: continue
-        cluster=[i]
-        for j,row2 in df.iterrows():
-            if j<=i or j in used: continue
-            dlat=row['lat_adj']-row2['lat_adj']
-            dlon=row['lon_adj']-row2['lon_adj']
-            dist=math.sqrt(dlat**2+dlon**2)
-            if dist<=cluster_radius: cluster.append(j); used.add(j)
-        clusters.append(cluster)
+        # 聚合城市
+        clusters=[]; used=set()
+        for i,row in df.iterrows():
+            if i in used: continue
+            cluster=[i]
+            for j,row2 in df.iterrows():
+                if j<=i or j in used: continue
+                dlat=row['lat_adj']-row2['lat_adj']
+                dlon=row['lon_adj']-row2['lon_adj']
+                dist=math.sqrt(dlat**2+dlon**2)
+                if dist<=cluster_radius: cluster.append(j); used.add(j)
+            clusters.append(cluster)
 
-    # 自动展开聚合点 + 手动展开
-    expanded_clusters = set()
-    for idx,cluster in enumerate(clusters):
-        if len(cluster)==1 or df.loc[cluster,'total'].sum()>=auto_expand_threshold:
-            expanded_clusters.add(idx)
-    expanded_clusters = expanded_clusters.union(st.session_state["expanded_clusters"])
+        # 自动展开聚合点 + 手动展开
+        expanded_clusters = set()
+        for idx,cluster in enumerate(clusters):
+            if len(cluster)==1 or df.loc[cluster,'total'].sum()>=auto_expand_threshold:
+                expanded_clusters.add(idx)
+        expanded_clusters = expanded_clusters.union(st.session_state["expanded_clusters"])
 
-    # 手动展开按钮
-    st.subheader("Cluster control")
-    for idx,cluster in enumerate(clusters):
-        if len(cluster)>1:
-            label=f"Toggle cluster {idx} ({len(cluster)} cities)"
-            if st.button(label, key=f"cluster_btn_{idx}"):
-                if idx in st.session_state["expanded_clusters"]:
-                    st.session_state["expanded_clusters"].remove(idx)
-                else:
-                    st.session_state["expanded_clusters"].add(idx)
-                st.experimental_rerun()
+        # 手动展开按钮
+        st.subheader("Cluster control")
+        for idx,cluster in enumerate(clusters):
+            if len(cluster)>1:
+                label=f"Toggle cluster {idx} ({len(cluster)} cities)"
+                if st.button(label, key=f"cluster_btn_{idx}"):
+                    if idx in st.session_state["expanded_clusters"]:
+                        st.session_state["expanded_clusters"].remove(idx)
+                    else:
+                        st.session_state["expanded_clusters"].add(idx)
+                    st.experimental_rerun()
 
-    # 绘制地图
-    fig=go.Figure()
-    colors=px.colors.qualitative.Plotly
-    for idx,cluster in enumerate(clusters):
-        if idx in expanded_clusters:
-            for i in cluster:
-                row=df.loc[i]
-                hover_text=f"{row['name']}<br>"+"<br>".join([f"{t}: {row[t]}" for t in selected_tasks])
+        # 绘制地图
+        fig=go.Figure()
+        colors=px.colors.qualitative.Plotly
+        for idx,cluster in enumerate(clusters):
+            if idx in expanded_clusters:
+                for i in cluster:
+                    row=df.loc[i]
+                    hover_text=f"{row['name']}<br>"+"<br>".join([f"{t}: {row[t]}" for t in selected_tasks])
+                    fig.add_trace(go.Scattergeo(
+                        lon=[row['lon_adj']],lat=[row['lat_adj']],
+                        text=[hover_text], hoverinfo='text',
+                        mode='markers+text',
+                        marker=dict(size=row['total']+1,color='blue'),
+                        textposition="top center",
+                        showlegend=False
+                    ))
+                    n=len(selected_tasks)
+                    for j,t in enumerate(selected_tasks):
+                        angle=2*math.pi*j/n
+                        offset_lat=circle_radius*math.sin(angle)
+                        offset_lon=circle_radius*math.cos(angle)
+                        fig.add_trace(go.Scattergeo(
+                            lon=[row['lon_adj']+offset_lon],
+                            lat=[row['lat_adj']+offset_lat],
+                            text=[f"{t}: {row[t]}"],
+                            mode='text',
+                            textfont=dict(color=colors[j%len(colors)],size=label_size),
+                            showlegend=False
+                        ))
+            else:
+                lat_mean=df.loc[cluster,'lat_adj'].mean()
+                lon_mean=df.loc[cluster,'lon_adj'].mean()
+                total_sum=df.loc[cluster,'total'].sum()
+                hover_text=f"Cluster ({len(cluster)} cities, Total: {total_sum})<br>" + \
+                           "<br>".join([f"{df.loc[i,'name']}: {df.loc[i,'total']}" for i in cluster])
                 fig.add_trace(go.Scattergeo(
-                    lon=[row['lon_adj']],lat=[row['lat_adj']],
+                    lon=[lon_mean],lat=[lat_mean],
                     text=[hover_text], hoverinfo='text',
                     mode='markers+text',
-                    marker=dict(size=row['total']+1,color='blue'),
+                    marker=dict(size=total_sum+3,color='red',symbol='diamond'),
                     textposition="top center",
                     showlegend=False
                 ))
-                n=len(selected_tasks)
-                for j,t in enumerate(selected_tasks):
-                    angle=2*math.pi*j/n
-                    offset_lat=circle_radius*math.sin(angle)
-                    offset_lon=circle_radius*math.cos(angle)
-                    fig.add_trace(go.Scattergeo(
-                        lon=[row['lon_adj']+offset_lon],
-                        lat=[row['lat_adj']+offset_lat],
-                        text=[f"{t}: {row[t]}"],
-                        mode='text',
-                        textfont=dict(color=colors[j%len(colors)],size=label_size),
-                        showlegend=False
-                    ))
-        else:
-            lat_mean=df.loc[cluster,'lat_adj'].mean()
-            lon_mean=df.loc[cluster,'lon_adj'].mean()
-            total_sum=df.loc[cluster,'total'].sum()
-            hover_text=f"Cluster ({len(cluster)} cities, Total: {total_sum})<br>" + \
-                       "<br>".join([f"{df.loc[i,'name']}: {df.loc[i,'total']}" for i in cluster])
-            fig.add_trace(go.Scattergeo(
-                lon=[lon_mean],lat=[lat_mean],
-                text=[hover_text], hoverinfo='text',
-                mode='markers+text',
-                marker=dict(size=total_sum+3,color='red',symbol='diamond'),
-                textposition="top center",
-                showlegend=False
-            ))
 
-    lats=df['lat_adj']; lons=df['lon_adj']
-    fig.update_geos(lataxis_range=[lats.min()-1,lats.max()+1],
-                    lonaxis_range=[lons.min()-1,lons.max()+1])
-    st.plotly_chart(fig,use_container_width=True)
+        lats=df['lat_adj']; lons=df['lon_adj']
+        fig.update_geos(lataxis_range=[lats.min()-1,lats.max()+1],
+                        lonaxis_range=[lons.min()-1,lons.max()+1])
+        st.plotly_chart(fig,use_container_width=True)
