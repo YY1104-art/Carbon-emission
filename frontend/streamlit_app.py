@@ -1,3 +1,7 @@
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from backend import optimizer
 
 import streamlit as st
 import yaml, json, requests, pandas as pd, plotly.express as px
