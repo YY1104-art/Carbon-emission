@@ -1,22 +1,25 @@
 import streamlit as st
-import yaml, pandas as pd, math
+import yaml, json, pandas as pd, math
 import plotly.graph_objects as go
 import plotly.express as px
 
-st.set_page_config(layout="wide", page_title="Carbon-aware LLM Placement v15")
-st.title("Carbon-aware LLM Placement — v15")
+st.set_page_config(layout="wide", page_title="Carbon-aware LLM Placement Safe Version")
+st.title("Carbon-aware LLM Placement — Safe Version")
 
 # 初始化 session_state
 for key in ["cfg_area","last_res","cfg_hash","expanded_clusters"]:
     if key not in st.session_state:
         st.session_state[key] = set() if key=="expanded_clusters" else None
 
-# 上传或示例配置
+# 上传或使用内置示例
 uploaded = st.file_uploader("Upload YAML/JSON config", type=['yaml','yml','json'])
 if uploaded:
-    st.session_state["cfg_area"] = uploaded.read().decode('utf-8')
+    try:
+        st.session_state["cfg_area"] = uploaded.read().decode('utf-8')
+    except Exception as e:
+        st.error(f"读取上传文件失败: {e}")
 
-if not st.session_state["cfg_area"]:
+if not st.session_state.get("cfg_area"):
     example = {
         "cities":[{"name":"Zurich","Iv":0.013,"Hv":900,"lat":47.3769,"lon":8.5417},
                   {"name":"Paris","Iv":0.054,"Hv":3000,"lat":48.8566,"lon":2.3522},
@@ -42,22 +45,37 @@ if cfg_hash_new != st.session_state.get("cfg_hash"):
     st.session_state["last_res"] = None
     st.session_state["expanded_clusters"].clear()
 
-# 获取示例结果
+# 安全获取结果函数
 def get_result():
-    cfg = yaml.safe_load(st.session_state["cfg_area"])
-    return {"placements": {"0": {c["name"]: {t["name"]: 100 for t in cfg["tasks"]} for c in cfg["cities"]}}}
+    try:
+        cfg = yaml.safe_load(st.session_state.get("cfg_area","")) or {}
+        cities = cfg.get("cities", [])
+        tasks = cfg.get("tasks", [])
+        return {"placements": {"0": {c["name"]: {t["name"]: 100 for t in tasks} for c in cities}}}
+    except Exception as e:
+        st.error(f"生成示例结果失败: {e}")
+        return {"placements": {}}
 
+# 如果 last_res 为空，生成默认结果
 if st.session_state["last_res"] is None:
     st.session_state["last_res"] = get_result()
 
 res = st.session_state["last_res"]
 placements = res.get("placements",{})
 
-if placements:
+if not placements:
+    st.warning("当前配置无城市或任务，请检查 YAML/JSON 文件内容。")
+else:
     first_period = list(placements.keys())[0]
-    cfg = yaml.safe_load(st.session_state["cfg_area"])
-    cities = cfg.get("cities",[])
-    tasks = [t["name"] for t in cfg.get("tasks",[])]
+    try:
+        cfg = yaml.safe_load(st.session_state["cfg_area"]) or {}
+        cities = cfg.get("cities", [])
+        tasks = [t["name"] for t in cfg.get("tasks",[])]
+    except Exception as e:
+        st.error(f"解析配置失败: {e}")
+        cities=[]
+        tasks=[]
+
     selected_tasks = st.multiselect("Select tasks to display", tasks, default=tasks)
 
     # 可调参数
@@ -70,8 +88,8 @@ if placements:
     # 构建城市数据
     rows=[]
     for c in cities:
-        r={"name":c["name"],"lat":c.get("lat"),"lon":c.get("lon")}
-        ps=placements.get(first_period,{}).get(c["name"],{})
+        r={"name":c.get("name",""),"lat":c.get("lat"),"lon":c.get("lon")}
+        ps=placements.get(first_period,{}).get(c.get("name",""),{})
         for t in selected_tasks: r[t]=ps.get(t,0)
         r["total"]=sum(r[t] for t in selected_tasks)
         rows.append(r)
@@ -102,7 +120,7 @@ if placements:
             if dist<=cluster_radius: cluster.append(j); used.add(j)
         clusters.append(cluster)
 
-    # 自动展开聚合点（总任务量超过阈值） + 手动展开
+    # 自动展开聚合点 + 手动展开
     expanded_clusters = set()
     for idx,cluster in enumerate(clusters):
         if len(cluster)==1 or df.loc[cluster,'total'].sum()>=auto_expand_threshold:
